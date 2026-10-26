@@ -1,0 +1,6 @@
+*.o
+/load_balancer
+/load_balancer.exe
+/load_balancer_tests
+/load_balancer_tests.exe
+/docs/api/

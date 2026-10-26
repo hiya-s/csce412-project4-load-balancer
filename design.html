@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CSCE 412 Project 4 | Load Balancer Design</title>
+  <style>
+    :root { color-scheme: light; --maroon: #500000; --navy: #17324d; --gold: #d6a84f; --paper: #f6f4ef; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: #1f2933; font: 16px/1.6 system-ui, sans-serif; }
+    header { padding: 2rem max(1.25rem, calc((100% - 1100px) / 2)); background: var(--maroon); color: white; border-bottom: 6px solid var(--gold); }
+    header p { margin: .3rem 0 0; color: #f4e8d0; }
+    main { max-width: 1100px; margin: auto; padding: 1.5rem; }
+    section { margin: 1.5rem 0; padding: 1.5rem; background: white; border-radius: .7rem; box-shadow: 0 3px 14px #17202a12; }
+    h1, h2 { line-height: 1.2; }
+    h2 { color: var(--maroon); }
+    .diagram { overflow-x: auto; }
+    svg { display: block; width: 100%; min-width: 760px; height: auto; }
+    .node { fill: #fff; stroke: var(--navy); stroke-width: 2; rx: 10; }
+    .decision { fill: #fff5df; stroke: #9a6a00; stroke-width: 2; }
+    .edge { fill: none; stroke: #526778; stroke-width: 2.5; marker-end: url(#arrow); }
+    .label { font: 15px system-ui, sans-serif; fill: #17202a; text-anchor: middle; }
+    .small { font: 13px system-ui, sans-serif; fill: #36454f; text-anchor: middle; }
+    code { background: #f0edf0; padding: .1rem .35rem; border-radius: .25rem; }
+    footer { max-width: 1100px; margin: auto; padding: 0 1.5rem 2rem; color: #52616b; }
+    @media (max-width: 650px) { main { padding: .75rem; } section { padding: 1rem; } }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Texas A&amp;M University | CSCE 412</strong>
+    <h1>Project 4: Load Balancer Design</h1>
+    <p>Request queue, firewall check, server processing, and elastic capacity</p>
+  </header>
+  <main>
+    <section>
+      <h2>Simulation workflow</h2>
+      <p>The simulation preloads a FIFO queue, admits random arrivals after an IPv4 block check, assigns work to idle servers, and periodically evaluates capacity.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 1000 720" role="img" aria-labelledby="diagram-title diagram-desc">
+          <title id="diagram-title">Load balancer simulation flow</title>
+          <desc id="diagram-desc">Initialize servers and a full request queue, check and enqueue random arrivals, process requests on idle servers, apply scaling thresholds and cooldown, and finish with a run summary.</desc>
+          <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#526778"/></marker></defs>
+          <rect class="node" x="380" y="20" width="240" height="58"/>
+          <text class="label" x="500" y="46">Read config and user input</text><text class="small" x="500" y="66">server count, duration, mode</text>
+          <path class="edge" d="M500 78 V105"/>
+          <rect class="node" x="350" y="108" width="300" height="62"/>
+          <text class="label" x="500" y="135">Create server pool and FIFO queue</text><text class="small" x="500" y="156">preload 100 requests per server</text>
+          <path class="edge" d="M500 170 V198"/>
+          <rect class="node" x="370" y="201" width="260" height="62"/>
+          <text class="label" x="500" y="228">Generate and filter arrivals</text><text class="small" x="500" y="249">block source IPs; enqueue allowed requests</text>
+          <path class="edge" d="M500 263 V291"/>
+          <rect class="node" x="350" y="294" width="300" height="62"/>
+          <text class="label" x="500" y="321">Evaluate server scaling</text><text class="small" x="500" y="342">after cooldown: queue &gt; 80× add; &lt; 50× remove idle</text>
+          <path class="edge" d="M500 356 V384"/>
+          <rect class="node" x="365" y="387" width="270" height="62"/>
+          <text class="label" x="500" y="414">Dispatch and process requests</text><text class="small" x="500" y="435">advance active work by one cycle</text>
+          <path class="edge" d="M500 449 V473"/>
+          <polygon class="decision" points="500,475 630,525 500,575 370,525"/>
+          <text class="label" x="500" y="520">Run duration reached?</text>
+          <path class="edge" d="M500 575 V615"/>
+          <text class="small" x="525" y="600">Yes</text>
+          <rect class="node" x="370" y="618" width="260" height="62"/>
+          <text class="label" x="500" y="645">Write summary and finish</text><text class="small" x="500" y="666">completed, queued, active, blocked, scaling</text>
+          <path class="edge" d="M370 525 H130 V232 H365"/>
+          <text class="small" x="152" y="510">No: next clock cycle</text>
+        </svg>
+      </div>
+    </section>
+    <section>
+      <h2>Component responsibilities</h2>
+      <ul>
+        <li><code>Request</code> stores source/destination IP, service time, and job type.</li>
+        <li><code>IPBlocker</code> parses IPv4 addresses and checks exact/CIDR ranges before queue admission.</li>
+        <li><code>WebServer</code> owns at most one active request and reports completion after its service cycles.</li>
+        <li><code>LoadBalancer</code> owns the FIFO queue, server pool, clock, counters, logger, and scaling policy.</li>
+        <li><code>Config</code> parses validated settings; <code>main</code> combines configuration, prompts, and CLI overrides.</li>
+      </ul>
+    </section>
+    <section>
+      <h2>Method design: inputs, outputs, and responsibilities</h2>
+      <p>The public interfaces make the ownership and one-cycle processing contract explicit. Helper methods are private to the component that owns the relevant state.</p>
+      <div class="diagram">
+        <table>
+          <thead><tr><th>Class / method</th><th>Inputs</th><th>Return value</th><th>Responsibility</th></tr></thead>
+          <tbody>
+            <tr><td><code>Request</code></td><td>Fields initialized by caller: source IP, destination IP, processing cycles, P/S type, request ID</td><td>Struct value; no methods</td><td>Carry immutable job metadata through the FIFO queue and server.</td></tr>
+            <tr><td><code>Config::loadFromFile(path)</code></td><td>Configuration file path</td><td>Validated <code>Config</code>; throws on invalid/unreadable input</td><td>Parse settings and validate probabilities, limits, and ranges.</td></tr>
+            <tr><td><code>WebServer::assignRequest(request)</code></td><td>One request</td><td><code>true</code> if assigned; <code>false</code> if busy</td><td>Accept work only while the server is idle.</td></tr>
+            <tr><td><code>WebServer::tick()</code></td><td>No arguments; advances one cycle</td><td><code>true</code> exactly when this tick completes its request</td><td>Decrease remaining time; clear completed work and become idle.</td></tr>
+            <tr><td><code>WebServer::isBusy()</code></td><td>None</td><td>Boolean</td><td>Report whether an active request can be removed with the server.</td></tr>
+            <tr><td><code>IPBlocker::isBlocked(ip)</code></td><td>Source IPv4 text</td><td>Boolean; throws for malformed IP</td><td>Parse numerically and compare against exact addresses/CIDR masks.</td></tr>
+            <tr><td><code>LoadBalancer::LoadBalancer(config)</code></td><td>Validated configuration</td><td>Initialized load balancer</td><td>Create initial servers and filter the initial requests through the blocker into the FIFO queue.</td></tr>
+            <tr><td><code>LoadBalancer::run(cycles)</code></td><td>Positive cycle count</td><td>None; emits summaries/log and updates statistics</td><td>For each cycle: arrivals, scaling check, dispatch FIFO work, tick servers, record completions, advance clock.</td></tr>
+            <tr><td><code>LoadBalancer::enqueueArrivals()</code></td><td>Configured probability and batch size</td><td>None; updates generated/blocked/accepted counts</td><td>Generate each request and apply the firewall before enqueueing.</td></tr>
+            <tr><td><code>LoadBalancer::scaleServers()</code></td><td>Current clock and waiting queue</td><td>None; updates server pool when allowed</td><td>Above 80× add one; below 50× remove one idle server; enforce cooldown and minimum count.</td></tr>
+            <tr><td><code>LoadBalancer::getStats()</code></td><td>None</td><td>Snapshot of run counters</td><td>Expose counts for tests and the generated-request accounting check.</td></tr>
+            <tr><td><code>main(argc, argv)</code></td><td>Command-line options and interactive answers when omitted</td><td>Process exit status: 0 success, nonzero invalid input/runtime error</td><td>Load config, obtain starting servers and duration, apply mode/log overrides, create and run the balancer.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Cycle order:</strong> generate/filter arrivals → check scaling/cooldown → dispatch requests from the queue front to idle servers → advance each busy server by one cycle → record completions → increment completed-cycle count. An assigned five-cycle request is ticked on five successive cycles and becomes idle after the fifth tick.</p>
+    </section>
+    <section>
+      <h2>Scaling and reporting</h2>
+      <p>At most one server is added or removed per scaling check. The queue thresholds are strict: scale up above 80 waiting requests per server, and scale down below 50. A configurable cooldown separates successful changes. Only idle servers are removed, with a configurable minimum pool size.</p>
+      <p>Verbose mode logs meaningful request and scaling events; quiet mode keeps console output to start/end summaries. Both modes write run statistics to the configured log. End-of-run reporting separates queued and active requests from completed requests.</p>
+    </section>
+    <section>
+      <h2>API documentation and hosting</h2>
+      <p><a href="docs/api/index.html">Open generated Doxygen API documentation</a> after running <code>doxygen Doxyfile</code>.</p>
+      <p>This HTML is a self-contained design page. Upload it and the generated Doxygen HTML folder to the project owner's <code>people.tamu.edu</code> hosting space to publish; this local project does not contain the credentials needed to upload it.</p>
+    </section>
+  </main>
+  <footer>CSCE 412 Project 4 — Load Balancer Simulation</footer>
+</body>
+</html>

@@ -1,0 +1,16 @@
+simulation_cycles = 100000
+initial_servers = 3
+min_servers = 1
+max_servers = 40
+initial_requests_per_server = 100
+min_processing_time = 2
+max_processing_time = 10
+arrival_probability = 0.65
+arrival_batch_size = 1
+scale_up_queue_per_server = 80
+scale_down_queue_per_server = 50
+scaling_cooldown_cycles = 10
+random_seed = 441
+verbose = true
+log_file = simulation.log
+blocked_ips = 192.168.1.0/24, 10.0.0.1
