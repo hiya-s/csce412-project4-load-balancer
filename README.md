@@ -139,9 +139,21 @@ requests, accounting, and invalid configuration.
 
 ## Documentation and design
 
-[`design.html`](design.html) is a self-contained workflow/design page suitable for local
-preview and upload to a personal web-hosting folder. `Doxyfile` configures
-Doxygen to produce HTML API documentation in `docs/api`. Generate it with
-`doxygen Doxyfile` when Doxygen is installed. The generated HTML can then be
-uploaded to the required `people.tamu.edu` account; hosting credentials and
-uploading are intentionally left to the project owner.
+[`design.html`](design.html) is the workflow and design page. The
+[`Doxyfile`](Doxyfile) generates HTML API documentation under `docs/api`, using
+this README as the landing page and including the design page and configuration
+file in the output.
+
+Generate or refresh the documentation after changing source comments:
+
+```sh
+doxygen Doxyfile
+```
+
+Open `docs/api/index.html` to review the generated API documentation locally.
+The ready-to-upload [`project4-doxygen-html.zip`](project4-doxygen-html.zip)
+contains the generated HTML site, design page, config, Doxygen settings, and
+simulation log. Extract it and upload its contents to the documentation folder
+on `people.tamu.edu`. This repository includes the generated site and the
+Doxygen source/configuration, but publishing requires the project owner's TAMU
+web-hosting access. The generated HTML is separate from the source ZIP.
