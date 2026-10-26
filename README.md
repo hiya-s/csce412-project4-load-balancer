@@ -1,8 +1,9 @@
 # CSCE 412 Project 4 — Load Balancer
 
-A C++17 discrete-time simulation of job-type routing, FIFO request queues, an
-IP range blocker, and dynamically scaled web-server pools. Processing (`P`)
-and streaming (`S`) requests each have a dedicated queue and server pool.
+A C++17 discrete-time simulation of a switch routing requests to two
+independent, dynamically scaled load balancers. Processing (`P`) and streaming
+(`S`) each have their own FIFO queue, servers, scaling cooldown, and statistics;
+the two balancers advance together on one simulation clock.
 
 ## Build
 
@@ -16,7 +17,7 @@ The Makefile builds `load_balancer`; `make clean` removes generated object
 files and the executable. With a C++17 compiler installed, a direct build is:
 
 ```sh
-g++ -std=c++17 -Wall -Wextra -Wpedantic -O2 main.cpp Config.cpp IPBlocker.cpp WebServer.cpp LoadBalancer.cpp -o load_balancer
+g++ -std=c++17 -Wall -Wextra -Wpedantic -O2 main.cpp Config.cpp IPBlocker.cpp WebServer.cpp LoadBalancer.cpp Switch.cpp -o load_balancer
 ```
 
 ## Run
@@ -28,8 +29,7 @@ to use the configured defaults):
 ./load_balancer
 ```
 
-Use flags for a non-interactive run. To reproduce the required 20-starting-
-server, 100,000-cycle quiet run and write its summary to a log:
+Use flags for a non-interactive run. To run with 20 total starting servers for 100,000 cycles in quiet mode:
 
 ```sh
 ./load_balancer --servers 20 --cycles 100000 --quiet --log project4-summary.log
@@ -51,34 +51,34 @@ adds the event details. Console event colors are not written to the log.
 Use `--help` to show all command-line options. For Windows PowerShell, invoke
 the executable as `.\load_balancer.exe` with the same options.
 
-### Required 20-server, 100,000-cycle run
+[`project4-summary.log`](project4-summary.log) records the checked quiet-mode
+run, and [`project4-verbose.log`](project4-verbose.log) records the full
+verbose-mode run. Both use 20 as the **total starting server count**, split
+evenly between the P and S balancers, and run for 100,000 cycles. Each report
+includes both per-balancer statistics and aggregate request accounting.
+Automatic scaling can change the total server count during the run. The
+quiet and verbose runs use the same seed and configuration, so their
+simulation totals match.
 
-[`project4-summary.log`](project4-summary.log) is the actual quiet-mode output
-from the required run. It used the settings shown in `config.txt`, with the
-server count and duration overridden by the command above. The run started
-with 20 servers (10 processing and 10 streaming), generated 2,000 initial
-requests, and blocked 5 of those, leaving an initial queue of 1,995. Because
-scaling is enabled, 20 is the starting count, not a fixed count.
+| Result | Total | Processing balancer | Streaming balancer |
+| --- | ---: | ---: | ---: |
+| Servers at start | 20 | 10 | 10 |
+| Servers at end | 4 | 2 | 2 |
+| Initial accepted queue | 1,995 | 1,004 | 991 |
+| Generated requests | 66,949 | 33,369 | 33,580 |
+| Accepted requests | 66,725 | 33,238 | 33,487 |
+| Blocked requests | 224 | 131 | 93 |
+| Completed requests | 66,614 | 33,232 | 33,382 |
+| Remaining queued | 107 | 4 | 103 |
+| Active requests at end | 4 | 2 | 2 |
+| Servers added | 27 | 15 | 12 |
+| Servers removed | 43 | 23 | 20 |
+| Cycles completed | 100,000 | — | — |
+| Request accounting | PASS | — | — |
 
-| Result | Value |
-| --- | ---: |
-| Requested and completed clock cycles | 100,000 |
-| Initial servers (processing / streaming) | 20 (10 / 10) |
-| Final servers (processing / streaming) | 4 (2 / 2) |
-| Initial queue after firewall checks | 1,995 |
-| Generated requests | 66,949 |
-| Blocked requests | 224 |
-| Completed requests (processing / streaming) | 66,614 (33,159 / 33,455) |
-| Requests remaining in queues | 107 (77 processing / 30 streaming) |
-| Requests still being processed | 4 |
-| Servers added / removed | 27 / 43 |
-| Request accounting | PASS |
-
-The accounting check is
-`generated = blocked + completed + queued + still processing`; for this run,
-`66,949 = 224 + 66,614 + 107 + 4`. Generated totals include initial and
-later-arriving requests. The initial queue count reflects only requests
-accepted by the firewall.
+The aggregate accounting relationship is
+`generated = blocked + completed + queued + still processing`:
+`66,949 = 224 + 66,614 + 107 + 4`.
 
 ## Configuration
 
@@ -89,7 +89,7 @@ comments are ignored. A file path may be supplied as `--config FILE`.
 | --- | --- |
 | `simulation_cycles` | Default run duration in clock cycles |
 | `initial_servers` | Default starting server count; can be overridden with `--servers` |
-| `min_servers`, `max_servers` | Minimum and maximum total server count across both pools |
+| `min_servers`, `max_servers` | Minimum and maximum total server count shared across the P/S balancers |
 | `initial_requests_per_server` | Initial queue fill per starting server (default 100) |
 | `min_processing_time`, `max_processing_time` | Inclusive request service-time bounds |
 | `arrival_probability` | Probability of an arrival batch each cycle, from 0 to 1 |
@@ -103,29 +103,25 @@ comments are ignored. A file path may be supplied as `--config FILE`.
 | `log_file` | Default path for the run log |
 | `blocked_ips` | Comma-separated IPv4 addresses and CIDR ranges |
 
-The user-provided starting server count is the total across both pools; it is
-split as evenly as possible, with an odd extra server assigned to processing.
-At least two starting servers are required so each job type has a server.
-Each pool scales against its own waiting queue and server count. A pool always
-keeps one server; only idle servers are removed. Accepted requests are checked
-against blocked ranges before entering their type-specific FIFO queue. At the
-end of a run, queued and active requests are reported separately from completed
-work.
+The `Switch` creates two independent `LoadBalancer` objects, one per job type.
+It applies the IPv4 blocker and routes each accepted request to the matching
+balancer. The user-provided starting server count is split as evenly as
+possible, with an odd extra server assigned to processing; at least two
+starting servers are required. Each balancer has a private FIFO queue, server
+pool, scaling cooldown, and counters. Both balancers process each shared clock
+cycle, and their individual plus combined statistics appear in the summaries.
+Each keeps at least one server and removes only idle servers.
 
 ## Method and cycle design
 
-The [design page](design.html) records the method inputs/return values for
-configuration loading, server assignment and ticking, numeric IP checking,
-queue processing, scaling, statistics, and `main()`. Each cycle follows this
-order: generate and firewall-check arrivals; evaluate scaling and cooldown;
-tick each server that was already busy at the start of processing; record any
-completion; dispatch each queue's FIFO requests only to its matching pool's
-idle servers; then advance the completed-cycle count. Newly assigned work
-therefore gets its first processing tick on the next cycle. A five-cycle
-request assigned after cycle 0 completes after its fifth processing tick.
-`WebServer::tick()` returns true exactly on the cycle a request completes. The
-load balancer owns each server through `std::unique_ptr`, so successful scaling
-destroys removed idle server objects.
+The [design page](design.html) records method inputs and return values. Each
+cycle follows this order: generate arrivals; firewall-check and route them;
+check each balancer's independent scaling cooldown and queue threshold; tick
+servers that were already busy; record completions; dispatch each FIFO to idle
+servers in its own balancer; then advance the shared clock. A request assigned
+during a cycle starts processing on the next cycle. `WebServer::tick()` returns
+true on the exact cycle a request completes. Servers are owned by
+`std::unique_ptr` and idle server objects are destroyed when scaled down.
 
 Run focused regression tests with:
 
@@ -133,9 +129,10 @@ Run focused regression tests with:
 make test
 ```
 
-They cover five-cycle processing, FIFO dispatch, scale-up and cooldown,
-scale-down safety/minimum capacity, CIDR boundaries, blocked initial and later
-requests, accounting, and invalid configuration.
+They cover five-cycle processing, FIFO dispatch to the correct independent
+balancer, per-balancer scale-up/cooldown, scale-down safety/minimum capacity,
+CIDR boundaries, blocked initial and later requests, accounting, and invalid
+configuration.
 
 ## Documentation and design
 
@@ -154,6 +151,4 @@ Open `docs/api/index.html` to review the generated API documentation locally.
 The ready-to-upload [`project4-doxygen-html.zip`](project4-doxygen-html.zip)
 contains the generated HTML site, design page, config, Doxygen settings, and
 simulation log. Extract it and upload its contents to the documentation folder
-on `people.tamu.edu`. This repository includes the generated site and the
-Doxygen source/configuration, but publishing requires the project owner's TAMU
-web-hosting access. The generated HTML is separate from the source ZIP.
+on `people.tamu.edu`. The generated HTML is separate from the source ZIP.

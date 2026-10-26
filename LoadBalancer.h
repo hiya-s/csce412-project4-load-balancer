@@ -1,127 +1,115 @@
 /**
  * @file LoadBalancer.h
- * @brief Declares the request queue, server pool, clock, and scaling policy.
+ * @brief Declares one job-type-specific load balancer.
  */
 #ifndef LOAD_BALANCER_H
 #define LOAD_BALANCER_H
 
 #include "Config.h"
-#include "IPBlocker.h"
+#include "Request.h"
 #include "WebServer.h"
 
 #include <cstddef>
-#include <fstream>
 #include <memory>
 #include <queue>
-#include <random>
 #include <string>
 #include <vector>
 
 /**
- * @brief Snapshot of counters after or during a simulation.
+ * @brief Per-balancer counters for a single request type.
  */
-struct SimulationStats {
+struct LoadBalancerStats {
+    char jobType = 'P';
     int initialServers = 0;
     int finalServers = 0;
-    int requestedCycles = 0;
-    int cyclesCompleted = 0;
     std::size_t initialQueueSize = 0;
-    std::size_t remainingQueuedRequests = 0;
-    std::size_t requestsStillProcessing = 0;
+    std::size_t queuedRequests = 0;
+    std::size_t activeRequests = 0;
     std::size_t generatedRequests = 0;
     std::size_t acceptedRequests = 0;
     std::size_t blockedRequests = 0;
     std::size_t completedRequests = 0;
     std::size_t serversAdded = 0;
     std::size_t serversRemoved = 0;
-    int processingServers = 0;
-    int streamingServers = 0;
-    std::size_t processingQueueSize = 0;
-    std::size_t streamingQueueSize = 0;
-    std::size_t processingCompleted = 0;
-    std::size_t streamingCompleted = 0;
 };
 
 /**
- * @brief Simulates request arrivals, dispatch, processing, and server scaling.
+ * @brief Owns a FIFO request queue and dynamically scaled servers for one job type.
+ *
+ * The Switch submits only matching requests and calls advanceCycle once per
+ * simulation cycle. This keeps processing and streaming capacity independent
+ * while sharing the simulation clock.
  */
 class LoadBalancer {
 public:
     /**
-     * @brief Creates the initial server pool and configured starting queue.
-     * @param config Validated run settings.
-     * @throws std::invalid_argument If server-pool or traffic settings are invalid.
+     * @brief Creates a job-type-specific balancer and its initial servers.
+     * @param config Shared simulation and scaling settings.
+     * @param jobType Request type handled by this instance ('P' or 'S').
+     * @param initialServers Initial capacity assigned to this instance.
+     * @param minimumServers Minimum capacity reserved for this instance.
+     * @param maximumServers Maximum capacity available to this instance.
+     * @param firstServerId First unique server identifier to allocate.
      */
-    explicit LoadBalancer(const Config& config);
+    LoadBalancer(const Config& config, char jobType, int initialServers,
+                 int minimumServers, int maximumServers, int firstServerId);
 
     /**
-     * @brief Runs the simulation for the given number of clock cycles.
-     * @param duration Positive number of requested cycles.
-     * @throws std::invalid_argument If duration is not positive.
-     * @throws std::logic_error If this instance has already run.
-     * @throws std::runtime_error If the log cannot be opened or written.
+     * @brief Places a matching request at the end of this balancer's FIFO.
+     * @param request Request to enqueue.
+     * @throws std::invalid_argument If request type differs or service time is invalid.
      */
-    void run(int duration);
-    /** @return Number of requests waiting in the FIFO queue. */
+    void submitRequest(const Request& request);
+
+    /**
+     * @brief Records a generated request rejected by the switch firewall.
+     */
+    void recordBlockedRequest();
+    /**
+     * @brief Records a generated request routed to this job type.
+     */
+    void recordGeneratedRequest();
+    /**
+     * @brief Captures accepted preload queue size before the first cycle.
+     */
+    void recordInitialQueueSize();
+
+    /**
+     * @brief Scales, ticks active servers, and dispatches queued work for one cycle.
+     * @param clock Current shared simulation cycle, zero-based.
+     * @return Human-readable completion and scaling events.
+     */
+    std::vector<std::string> advanceCycle(int clock);
+
+    /** @return Snapshot of this job type's queue, capacity, and counters. */
+    LoadBalancerStats getStats() const;
+    /** @return Number of requests currently queued. */
     std::size_t getQueueSize() const;
-    /** @return Current server-pool size. */
-    int getServerCount() const;
-    /** @return Point-in-time snapshot of simulation counters. */
-    SimulationStats getStats() const;
-
-private:
-    struct JobPool {
-        explicit JobPool(char type) : jobType(type) {}
-
-        char jobType;
-        std::queue<Request> requests;
-        std::vector<std::unique_ptr<WebServer>> servers;
-        std::size_t serversAdded = 0;
-        std::size_t serversRemoved = 0;
-        std::size_t completedRequests = 0;
-    };
-
-    /** @brief Generates a request with a unique ID and configured random fields. */
-    Request generateRequest();
-    /** @brief Applies the blocker and queues an allowed request. */
-    void submitRequest(Request request);
-    /** @brief Generates and submits the configured arrival batch if selected. */
-    void enqueueArrivals();
-    /** @brief Dispatches queued requests from oldest to idle servers. */
-    void dispatchRequests();
-    /** @brief Applies threshold and cooldown rules to both job-specific pools. */
-    void scaleServers();
-    /** @brief Logs queue and capacity counters at the configured interval. */
-    void logProgressSnapshot();
-    /** @brief Writes an event to verbose console and log output. */
-    void logEvent(const std::string& message, const char* color = "");
-    /** @brief Writes initial settings and counts to the specified stream. */
-    void writeStartingSummary(std::ostream& output, int duration) const;
-    /** @brief Writes final counts and validates request accounting. */
-    void writeSummary(std::ostream& output);
-    /** @return Number of requests currently assigned to servers. */
+    /** @return Number of currently active server requests. */
     std::size_t getActiveRequestCount() const;
 
+private:
+    /** @brief Applies this pool's queue thresholds and cooldown policy. */
+    void scaleServers(int clock, std::vector<std::string>& events);
+    /** @brief Assigns oldest waiting requests to idle servers. */
+    void dispatchRequests();
+
     Config config_;
-    IPBlocker blocker_;
-    JobPool processingPool_{'P'};
-    JobPool streamingPool_{'S'};
-    std::mt19937 random_;
-    int nextServerId_ = 0;
-    int clock_ = 0;
+    char jobType_;
+    std::queue<Request> requests_;
+    std::vector<std::unique_ptr<WebServer>> servers_;
+    int minimumServers_;
+    int maximumServers_;
+    int nextServerId_;
+    int initialServers_;
     int nextScalingClock_ = 0;
-    int startingServerCount_ = 0;
-    int requestedCycles_ = 0;
     std::size_t initialQueueSize_ = 0;
-    std::size_t peakQueueSize_ = 0;
     std::size_t generatedRequests_ = 0;
     std::size_t acceptedRequests_ = 0;
     std::size_t blockedRequests_ = 0;
     std::size_t completedRequests_ = 0;
     std::size_t serversAdded_ = 0;
     std::size_t serversRemoved_ = 0;
-    std::ofstream log_;
-    bool hasRun_ = false;
 };
 
 #endif

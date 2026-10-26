@@ -19,7 +19,7 @@ struct Config {
     int initialServers = 3;
     /** Lowest permitted total server count across both job-type pools. */
     int minimumServers = 2;
-    /** Highest permitted server-pool size. */
+    /** Highest permitted total server count across both balancers. */
     int maximumServers = 10;
     /** Initial FIFO queue fill for each starting server. */
     int initialRequestsPerServer = 100;

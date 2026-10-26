@@ -3,7 +3,7 @@
  * @brief Parses command-line options and launches the load-balancer simulation.
  */
 #include "Config.h"
-#include "LoadBalancer.h"
+#include "Switch.h"
 
 #include <algorithm>
 #include <exception>
@@ -118,8 +118,8 @@ int main(int argc, char* argv[]) {
             runConfig.logFile = logPath;
         }
 
-        LoadBalancer loadBalancer(runConfig);
-        loadBalancer.run(duration);
+        Switch requestSwitch(runConfig);
+        requestSwitch.run(duration);
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n';
         return 1;

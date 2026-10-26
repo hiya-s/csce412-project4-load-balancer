@@ -4,7 +4,7 @@
  */
 #include "Config.h"
 #include "IPBlocker.h"
-#include "LoadBalancer.h"
+#include "Switch.h"
 #include "WebServer.h"
 
 #include <cassert>
@@ -65,13 +65,16 @@ void testFifoDispatchAndAccounting() {
     config.initialRequestsPerServer = 2;
     config.verbose = true;
 
-    LoadBalancer balancer(config);
+    Switch balancer(config);
     balancer.run(6);
     const SimulationStats stats = balancer.getStats();
     assert(stats.generatedRequests == 4);
     assert(stats.completedRequests == 4);
     assert(stats.remainingQueuedRequests == 0);
     assert(stats.requestsStillProcessing == 0);
+    assert(stats.processing.generatedRequests +
+               stats.streaming.generatedRequests ==
+           stats.generatedRequests);
 
     const std::string log = readFile(logPath);
     const std::size_t firstStreaming = log.find("S request #0 completed");
@@ -79,8 +82,8 @@ void testFifoDispatchAndAccounting() {
     assert(firstStreaming != std::string::npos);
     assert(secondStreaming != std::string::npos);
     assert(firstStreaming < secondStreaming);
-    assert(stats.processingCompleted > 0);
-    assert(stats.streamingCompleted > 0);
+    assert(stats.processing.completedRequests > 0);
+    assert(stats.streaming.completedRequests > 0);
     assert(log.find("Progress at cycle 1/6") != std::string::npos);
     assert(log.find("accepted request") == std::string::npos);
     assert(log.find("started request") == std::string::npos);
@@ -96,7 +99,7 @@ void testAssignedRequestsStartOnNextCycle() {
     config.minimumProcessingTime = 5;
     config.maximumProcessingTime = 5;
 
-    LoadBalancer fiveCycleRun(config);
+    Switch fiveCycleRun(config);
     fiveCycleRun.run(5);
     const SimulationStats fiveCycleStats = fiveCycleRun.getStats();
     assert(fiveCycleStats.completedRequests == 0);
@@ -106,7 +109,7 @@ void testAssignedRequestsStartOnNextCycle() {
     std::remove(config.logFile.c_str());
 
     config.logFile = "next-cycle-six.log";
-    LoadBalancer sixCycleRun(config);
+    Switch sixCycleRun(config);
     sixCycleRun.run(6);
     const SimulationStats sixCycleStats = sixCycleRun.getStats();
     assert(sixCycleStats.completedRequests >= 1);
@@ -124,11 +127,13 @@ void testScaleUpAndCooldown() {
     config.minimumProcessingTime = 100;
     config.maximumProcessingTime = 100;
 
-    LoadBalancer balancer(config);
+    Switch balancer(config);
     balancer.run(7);
     const SimulationStats stats = balancer.getStats();
-    assert(stats.serversAdded == 3);
-    assert(stats.finalServers == 5);
+    assert(stats.serversAdded == 6);
+    assert(stats.processing.serversAdded == 3);
+    assert(stats.streaming.serversAdded == 3);
+    assert(stats.finalServers == 8);
     std::remove(logPath.c_str());
 }
 
@@ -141,7 +146,7 @@ void testBusyServersAreNotRemovedAndMinimumIsOne() {
     busyConfig.minimumProcessingTime = 5;
     busyConfig.maximumProcessingTime = 5;
     busyConfig.scalingCooldownCycles = 0;
-    LoadBalancer busyBalancer(busyConfig);
+    Switch busyBalancer(busyConfig);
     busyBalancer.run(6);
     const SimulationStats busyStats = busyBalancer.getStats();
     assert(busyStats.serversAdded == 1);
@@ -152,7 +157,7 @@ void testBusyServersAreNotRemovedAndMinimumIsOne() {
     const std::string idleLogPath = "idle-scale-test.log";
     Config idleConfig = busyConfig;
     idleConfig.logFile = idleLogPath;
-    LoadBalancer idleBalancer(idleConfig);
+    Switch idleBalancer(idleConfig);
     idleBalancer.run(600);
     const SimulationStats idleStats = idleBalancer.getStats();
     assert(idleStats.serversAdded >= 1);
@@ -166,11 +171,13 @@ void testBusyServersAreNotRemovedAndMinimumIsOne() {
     minimumConfig.minimumServers = 2;
     minimumConfig.maximumServers = 2;
     minimumConfig.scalingCooldownCycles = 0;
-    LoadBalancer minimumBalancer(minimumConfig);
+    Switch minimumBalancer(minimumConfig);
     minimumBalancer.run(4);
     const SimulationStats minimumStats = minimumBalancer.getStats();
     assert(minimumStats.finalServers == 2);
     assert(minimumStats.serversRemoved == 0);
+    assert(minimumStats.processing.finalServers == 1);
+    assert(minimumStats.streaming.finalServers == 1);
     std::remove(minimumLogPath.c_str());
 }
 
@@ -191,12 +198,15 @@ void testFirewallBoundariesAndGeneratedAccounting() {
     config.maximumProcessingTime = 10;
     config.blockedIpRanges = {"10.0.0.0/8"};
 
-    LoadBalancer balancer(config);
+    Switch balancer(config);
     balancer.run(2);
     const SimulationStats stats = balancer.getStats();
     assert(stats.generatedRequests == 204);
     assert(stats.blockedRequests == 204);
     assert(stats.acceptedRequests == 0);
+    assert(stats.processing.blockedRequests +
+               stats.streaming.blockedRequests ==
+           stats.blockedRequests);
     assert(stats.generatedRequests ==
            stats.blockedRequests + stats.completedRequests +
                stats.remainingQueuedRequests + stats.requestsStillProcessing);
@@ -208,7 +218,7 @@ void testInvalidConfigurationIsRejected() {
     config.arrivalBatchSize = 0;
     bool rejected = false;
     try {
-        LoadBalancer balancer(config);
+        Switch balancer(config);
     } catch (const std::invalid_argument&) {
         rejected = true;
     }

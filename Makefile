@@ -1,10 +1,10 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -O2
 TARGET := load_balancer
-SOURCES := main.cpp Config.cpp IPBlocker.cpp WebServer.cpp LoadBalancer.cpp
+SOURCES := main.cpp Config.cpp IPBlocker.cpp WebServer.cpp LoadBalancer.cpp Switch.cpp
 OBJECTS := $(SOURCES:.cpp=.o)
 TEST_TARGET := load_balancer_tests
-TEST_SOURCES := tests.cpp Config.cpp IPBlocker.cpp WebServer.cpp LoadBalancer.cpp
+TEST_SOURCES := tests.cpp Config.cpp IPBlocker.cpp WebServer.cpp LoadBalancer.cpp Switch.cpp
 
 .PHONY: all clean run test
 
@@ -17,7 +17,7 @@ $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 run: $(TARGET)
-	./$(TARGET) config.txt
+	./$(TARGET) --config config.txt
 
 $(TEST_TARGET): $(TEST_SOURCES)
 	$(CXX) $(CXXFLAGS) -o $@ $(TEST_SOURCES)

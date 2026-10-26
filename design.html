@@ -35,7 +35,7 @@
   <main>
     <section>
       <h2>Simulation workflow</h2>
-      <p>The simulation preloads separate processing and streaming FIFO queues, routes random arrivals after an IPv4 block check, assigns work only to matching idle servers, and scales each pool independently.</p>
+      <p>A switch preloads requests and routes each request through an IPv4 firewall to one of two independent load balancers. The processing and streaming balancers each own a FIFO queue, server pool, scaling cooldown, and statistics; both advance once on each shared clock cycle.</p>
       <div class="diagram">
         <svg viewBox="0 0 1000 720" role="img" aria-labelledby="diagram-title diagram-desc">
           <title id="diagram-title">Load balancer simulation flow</title>
@@ -73,8 +73,9 @@
         <li><code>Request</code> stores source/destination IP, service time, and job type.</li>
         <li><code>IPBlocker</code> parses IPv4 addresses and checks exact/CIDR ranges before queue admission.</li>
         <li><code>WebServer</code> owns at most one active request and reports completion after its service cycles.</li>
-        <li><code>LoadBalancer</code> routes each accepted request to a P or S FIFO queue and scales the matching server pool.</li>
-        <li><code>Config</code> parses validated settings; <code>main</code> combines configuration, prompts, and CLI overrides.</li>
+        <li><code>Switch</code> generates requests, applies the IP blocker, routes by job type, advances both balancers on the shared clock, and reports combined/per-balancer statistics.</li>
+        <li>Each <code>LoadBalancer</code> owns one job type's FIFO queue and servers and scales independently.</li>
+        <li><code>Config</code> parses validated settings; <code>main</code> combines configuration, prompts, and CLI overrides before constructing the switch.</li>
       </ul>
     </section>
     <section>
@@ -90,21 +91,27 @@
             <tr><td><code>WebServer::tick()</code></td><td>No arguments; advances one cycle</td><td><code>true</code> exactly when this tick completes its request</td><td>Decrease remaining time; clear completed work and become idle. The load balancer ticks only requests assigned on an earlier cycle.</td></tr>
             <tr><td><code>WebServer::isBusy()</code></td><td>None</td><td>Boolean</td><td>Report whether an active request can be removed with the server.</td></tr>
             <tr><td><code>IPBlocker::isBlocked(ip)</code></td><td>Source IPv4 text</td><td>Boolean; throws for malformed IP</td><td>Parse numerically and compare against exact addresses/CIDR masks.</td></tr>
-            <tr><td><code>LoadBalancer::LoadBalancer(config)</code></td><td>Validated configuration</td><td>Initialized load balancer</td><td>Split total servers evenly between P and S pools (P gets an odd extra), then filter initial requests into the matching FIFO queue.</td></tr>
-            <tr><td><code>LoadBalancer::submitRequest(request)</code></td><td>Generated request with P or S job type</td><td>None; updates accepted or blocked counters</td><td>Apply the IP blocker, then route allowed P/S work to its corresponding queue.</td></tr>
-            <tr><td><code>LoadBalancer::run(cycles)</code></td><td>Positive cycle count</td><td>None; emits summaries/log and updates statistics</td><td>For each cycle: arrivals, per-pool scaling check, tick previously active servers, record completions, dispatch each FIFO only to its matching pool, advance clock.</td></tr>
-            <tr><td><code>LoadBalancer::enqueueArrivals()</code></td><td>Configured probability and batch size</td><td>None; updates generated/blocked/accepted counts</td><td>Generate each request and apply the firewall before enqueueing.</td></tr>
-            <tr><td><code>LoadBalancer::scaleServers()</code></td><td>Current clock, per-type queues, and pool sizes</td><td>None; updates one pool at most</td><td>Check each type's queue against 80×/50× its own server count; enforce global cooldown and at least one server per type.</td></tr>
-            <tr><td><code>LoadBalancer::getStats()</code></td><td>None</td><td>Snapshot of run counters</td><td>Expose counts for tests and the generated-request accounting check.</td></tr>
-            <tr><td><code>main(argc, argv)</code></td><td>Command-line options and interactive answers when omitted</td><td>Process exit status: 0 success, nonzero invalid input/runtime error</td><td>Load config, obtain starting servers and duration, apply mode/log overrides, create and run the balancer.</td></tr>
+            <tr><td><code>Switch::Switch(config)</code></td><td>Validated simulation configuration</td><td>Switch owning P/S balancers</td><td>Split total initial/minimum/maximum server capacities; reserve distinct server IDs for each balancer.</td></tr>
+            <tr><td><code>Switch::run(cycles)</code></td><td>Positive shared-clock duration</td><td>None; writes summaries and events</td><td>Preload requests, admit random arrivals, and advance both balancers once each cycle.</td></tr>
+            <tr><td><code>Switch::submitRequest(request)</code></td><td>Generated request with P/S job type</td><td>None; updates generated/blocked/accepted counters</td><td>Check source IP, account blocked requests, and route allowed work to the matching load balancer.</td></tr>
+            <tr><td><code>Switch::generateRequest()</code></td><td>None</td><td>Request with unique ID, random IPs, duration, and P/S type</td><td>Create one generated request and increment aggregate/per-balancer generated counters.</td></tr>
+            <tr><td><code>Switch::enqueueArrivals()</code></td><td>Configured arrival probability and batch size</td><td>None</td><td>On a selected cycle, generate the configured batch and route every request.</td></tr>
+            <tr><td><code>LoadBalancer::LoadBalancer(config, type, servers, min, max, firstId)</code></td><td>Shared settings, job type, capacity bounds, ID range</td><td>Initialized independent queue/server pool</td><td>Own only P or S work with independent counters and scaling cooldown.</td></tr>
+            <tr><td><code>LoadBalancer::submitRequest(request)</code></td><td>Request matching this instance's type</td><td>None; throws if routed to wrong pool</td><td>Enqueue accepted work at the FIFO tail.</td></tr>
+            <tr><td><code>LoadBalancer::advanceCycle(clock)</code></td><td>Current shared cycle number</td><td>List of completion/scaling event messages</td><td>Scale this pool; tick already-active servers; record completions; dispatch FIFO work to idle servers.</td></tr>
+            <tr><td><code>LoadBalancer::scaleServers(clock, events)</code></td><td>Shared cycle and event list</td><td>None; updates capacity and appends a scaling event</td><td>Apply this balancer's independent thresholds, capacity limits, and cooldown; remove only idle servers.</td></tr>
+            <tr><td><code>LoadBalancer::dispatchRequests()</code></td><td>None</td><td>None</td><td>Dispatch FIFO requests only to idle servers owned by this balancer.</td></tr>
+            <tr><td><code>LoadBalancer::getStats()</code></td><td>None</td><td>Per-balancer counter snapshot</td><td>Report generated, blocked, accepted, completed, queued, active, and scaling counts for one type.</td></tr>
+            <tr><td><code>Switch::getStats()</code></td><td>None</td><td>Aggregate and P/S snapshots</td><td>Support per-balancer reporting and global request accounting.</td></tr>
+            <tr><td><code>main(argc, argv)</code></td><td>Command-line options and interactive answers when omitted</td><td>Process exit status: 0 success, nonzero invalid input/runtime error</td><td>Load config, obtain total starting servers and duration, apply mode/log overrides, construct and run the switch.</td></tr>
           </tbody>
         </table>
       </div>
-      <p><strong>Cycle order:</strong> generate/filter arrivals → check scaling/cooldown → advance each server that was already busy → record completions → dispatch requests from the queue front to idle servers → increment completed-cycle count. Newly assigned requests start ticking next cycle. For example, a five-cycle request dispatched after the cycle-0 processing step gets its five ticks in cycles 1 through 5 and then becomes idle.</p>
+      <p><strong>Cycle order:</strong> the switch generates/filter arrivals and routes each accepted request → check each balancer's independent scaling cooldown → advance already-busy servers in both balancers → record completions → dispatch each FIFO queue to its own idle servers → increment the shared completed-cycle count. Newly assigned requests start ticking next cycle. For example, a five-cycle request dispatched after the cycle-0 processing step gets its five ticks in cycles 1 through 5 and then becomes idle. Both independent balancers participate in every cycle, keeping their simulation clocks synchronized.</p>
     </section>
     <section>
       <h2>Scaling and reporting</h2>
-      <p>The user's starting server count is total capacity. It is split evenly between the two job pools, assigning an odd extra server to P; therefore at least two starting servers are needed. Each type is queued FIFO and only handled by its own servers. Each pool is scaled against its own waiting queue: at most one server is added or removed globally per scaling check. Thresholds are strict: scale up above 80 waiting requests per server, and scale down below 50. A shared configurable cooldown separates successful changes. Each type keeps at least one server, and only idle servers are removed.</p>
+      <p>The user's starting server count is total capacity. It is split evenly between two independent balancers, assigning an odd extra server to P; at least two starting servers are required. Each type is queued FIFO and handled only by its own servers. The P and S balancers independently compare their queue sizes with their own capacities and independently enforce the configured cooldown. Each balancer scales up strictly above 80 waiting requests per server and scales down strictly below 50. Their combined capacity respects the configured total maximum/minimum, each keeps its reserved minimum of at least one server, and only idle servers are removed. Both report generated, accepted, blocked, completed, queued, active, and scaling statistics.</p>
       <p>Verbose mode logs completions, blocked requests, server scaling, and periodic queue/server snapshots. It omits routine accepted/dispatched request events, which can overwhelm a high-volume log. Quiet mode keeps console output to start/end summaries. Both modes write run statistics to the configured log, and console-only ANSI colors never enter the log file. End-of-run reporting separates queued and active requests from completed requests.</p>
     </section>
     <section>
