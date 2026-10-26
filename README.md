@@ -1,9 +1,8 @@
 # CSCE 412 Project 4 — Load Balancer
 
-A C++17 discrete-time simulation of a FIFO request queue, an IP range blocker,
-and a dynamically scaled web-server pool. A request contains source and
-destination IPv4 addresses, a positive processing time, and a `P` (processing)
-or `S` (streaming) job type.
+A C++17 discrete-time simulation of job-type routing, FIFO request queues, an
+IP range blocker, and dynamically scaled web-server pools. Processing (`P`)
+and streaming (`S`) requests each have a dedicated queue and server pool.
 
 ## Build
 
@@ -36,9 +35,12 @@ Use flags for a non-interactive run. The assignment's requested 20-server,
 ./load_balancer --servers 20 --cycles 100000 --quiet --log project4-summary.log
 ```
 
-Use `--verbose` instead of `--quiet` to print meaningful arrivals, blocked
-requests, completions, dispatches, and scaling events. Quiet mode prints the
-starting and ending summaries; both modes write a summary to the log file.
+Use `--verbose` instead of `--quiet` to print meaningful completions, blocked
+requests, scaling events, and periodic progress snapshots. Routine accepted
+and dispatched request events are intentionally omitted so logs remain useful
+at high traffic rates. Set `progress_snapshot_interval` to control snapshot
+frequency, or zero to disable snapshots. Quiet mode prints the starting and
+ending summaries; both modes write a summary to the log file.
 Use `--help` to show all command-line flags. No executable or generated log
 needs to be included in a source-only submission archive.
 
@@ -57,11 +59,12 @@ comments are ignored. A file path may be supplied as `--config FILE`.
 | --- | --- |
 | `simulation_cycles` | Default run duration in clock cycles |
 | `initial_servers` | Default starting server count; can be overridden with `--servers` |
-| `min_servers`, `max_servers` | Minimum and maximum server pool size |
+| `min_servers`, `max_servers` | Minimum and maximum total server count across both pools |
 | `initial_requests_per_server` | Initial queue fill per starting server (default 100) |
 | `min_processing_time`, `max_processing_time` | Inclusive request service-time bounds |
 | `arrival_probability` | Probability of an arrival batch each cycle, from 0 to 1 |
 | `arrival_batch_size` | Number of requests generated when an arrival occurs |
+| `progress_snapshot_interval` | Verbose progress snapshot interval in cycles; zero disables snapshots |
 | `scale_up_queue_per_server` | Add one server when the waiting queue is above this multiple of server count (default 80) |
 | `scale_down_queue_per_server` | Remove one idle server when the waiting queue is below this multiple (default 50) |
 | `scaling_cooldown_cycles` | Wait this many cycles between successful scale operations |
@@ -70,10 +73,14 @@ comments are ignored. A file path may be supplied as `--config FILE`.
 | `log_file` | Default path for the run log |
 | `blocked_ips` | Comma-separated IPv4 addresses and CIDR ranges |
 
-Only idle servers are removed, and the pool never drops below `min_servers`.
-Accepted requests are checked against blocked ranges before entering the
-queue. At the end of a run, queued and active requests are reported separately
-from completed work. The summary checks
+The user-provided starting server count is the total across both pools; it is
+split as evenly as possible, with an odd extra server assigned to processing.
+At least two starting servers are required so each job type has a server.
+Each pool scales against its own waiting queue and server count. A pool always
+keeps one server; only idle servers are removed. Accepted requests are checked
+against blocked ranges before entering their type-specific FIFO queue. At the
+end of a run, queued and active requests are reported separately from completed
+work. The summary checks
 `generated = blocked + completed + queued + still processing`.
 
 ## Method and cycle design
@@ -82,11 +89,13 @@ The [design page](design.html) records the method inputs/return values for
 configuration loading, server assignment and ticking, numeric IP checking,
 queue processing, scaling, statistics, and `main()`. Each cycle follows this
 order: generate and firewall-check arrivals; evaluate scaling and cooldown;
-dispatch FIFO requests to idle servers; tick each busy server; record any
-completion; then advance the completed-cycle count. `WebServer::tick()` returns
-true exactly on the cycle a request completes. The load balancer owns each
-server through `std::unique_ptr`, so successful scaling destroys removed idle
-server objects.
+tick each server that was already busy at the start of processing; record any
+completion; dispatch each queue's FIFO requests only to its matching pool's idle servers;
+then advance the completed-cycle count. Newly assigned work therefore gets its
+first processing tick on the next cycle. A five-cycle request assigned after cycle 0 completes
+after the tick on cycle 5. `WebServer::tick()` returns true exactly on the
+cycle a request completes. The load balancer owns each server through
+`std::unique_ptr`, so successful scaling destroys removed idle server objects.
 
 Run focused regression tests with:
 

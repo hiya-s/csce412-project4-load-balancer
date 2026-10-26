@@ -1,34 +1,43 @@
 Starting simulation
 Initial servers: 20
+Initial processing servers: 10
+Initial streaming servers: 10
 Requested cycles: 100000
-Initial queue size: 2000
+Initial queue size: 1995
 Logging mode: quiet
 Log file: project4-summary.log
-Server limits: 1 to 40
+Server limits: 2 to 40
 Initial requests per server: 100
 Arrival probability: 0.65
 Arrival batch size: 1
+Progress snapshot interval: 10000 cycles
 Processing time bounds: 2 to 10 cycles
 Scale-up threshold: above 80 queued requests per server
 Scale-down threshold: below 50 queued requests per server
 Scaling cooldown: 10 cycles
 Random seed: 441
-Blocked IP ranges: 192.168.1.0/24 10.0.0.1
+Blocked IP ranges: 10.1.0.0/16
 Generated requests so far: 2000
-Blocked requests so far: 0
+Blocked requests so far: 5
 
 Ending summary
 Initial servers: 20
 Final servers: 4
+Processing servers: 2
+Streaming servers: 2
+Processing requests completed: 33159
+Streaming requests completed: 33455
 Requested cycles: 100000
 Cycles completed: 100000
-Initial queue size: 2000
-Remaining queued requests: 245
+Initial queue size: 1995
+Remaining queued requests: 107
+Processing queue: 77
+Streaming queue: 30
 Requests still processing: 4
 Generated requests: 66949
-Accepted requests: 66949
-Completed requests: 66700
-Blocked requests: 0
-Servers added: 38
-Servers removed: 54
+Accepted requests: 66725
+Completed requests: 66614
+Blocked requests: 224
+Servers added: 27
+Servers removed: 43
 Accounting check (generated = blocked + completed + queued + processing): PASS

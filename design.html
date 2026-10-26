@@ -35,7 +35,7 @@
   <main>
     <section>
       <h2>Simulation workflow</h2>
-      <p>The simulation preloads a FIFO queue, admits random arrivals after an IPv4 block check, assigns work to idle servers, and periodically evaluates capacity.</p>
+      <p>The simulation preloads separate processing and streaming FIFO queues, routes random arrivals after an IPv4 block check, assigns work only to matching idle servers, and scales each pool independently.</p>
       <div class="diagram">
         <svg viewBox="0 0 1000 720" role="img" aria-labelledby="diagram-title diagram-desc">
           <title id="diagram-title">Load balancer simulation flow</title>
@@ -45,16 +45,16 @@
           <text class="label" x="500" y="46">Read config and user input</text><text class="small" x="500" y="66">server count, duration, mode</text>
           <path class="edge" d="M500 78 V105"/>
           <rect class="node" x="350" y="108" width="300" height="62"/>
-          <text class="label" x="500" y="135">Create server pool and FIFO queue</text><text class="small" x="500" y="156">preload 100 requests per server</text>
+          <text class="label" x="500" y="135">Split servers into P and S pools</text><text class="small" x="500" y="156">preload 100 requests per server</text>
           <path class="edge" d="M500 170 V198"/>
           <rect class="node" x="370" y="201" width="260" height="62"/>
-          <text class="label" x="500" y="228">Generate and filter arrivals</text><text class="small" x="500" y="249">block source IPs; enqueue allowed requests</text>
+          <text class="label" x="500" y="228">Generate and filter arrivals</text><text class="small" x="500" y="249">block source IPs; route P and S to own queues</text>
           <path class="edge" d="M500 263 V291"/>
           <rect class="node" x="350" y="294" width="300" height="62"/>
           <text class="label" x="500" y="321">Evaluate server scaling</text><text class="small" x="500" y="342">after cooldown: queue &gt; 80× add; &lt; 50× remove idle</text>
           <path class="edge" d="M500 356 V384"/>
           <rect class="node" x="365" y="387" width="270" height="62"/>
-          <text class="label" x="500" y="414">Dispatch and process requests</text><text class="small" x="500" y="435">advance active work by one cycle</text>
+          <text class="label" x="500" y="414">Tick active work, then dispatch</text><text class="small" x="500" y="435">new assignments start processing next cycle</text>
           <path class="edge" d="M500 449 V473"/>
           <polygon class="decision" points="500,475 630,525 500,575 370,525"/>
           <text class="label" x="500" y="520">Run duration reached?</text>
@@ -73,7 +73,7 @@
         <li><code>Request</code> stores source/destination IP, service time, and job type.</li>
         <li><code>IPBlocker</code> parses IPv4 addresses and checks exact/CIDR ranges before queue admission.</li>
         <li><code>WebServer</code> owns at most one active request and reports completion after its service cycles.</li>
-        <li><code>LoadBalancer</code> owns the FIFO queue, server pool, clock, counters, logger, and scaling policy.</li>
+        <li><code>LoadBalancer</code> routes each accepted request to a P or S FIFO queue and scales the matching server pool.</li>
         <li><code>Config</code> parses validated settings; <code>main</code> combines configuration, prompts, and CLI overrides.</li>
       </ul>
     </section>
@@ -87,24 +87,25 @@
             <tr><td><code>Request</code></td><td>Fields initialized by caller: source IP, destination IP, processing cycles, P/S type, request ID</td><td>Struct value; no methods</td><td>Carry immutable job metadata through the FIFO queue and server.</td></tr>
             <tr><td><code>Config::loadFromFile(path)</code></td><td>Configuration file path</td><td>Validated <code>Config</code>; throws on invalid/unreadable input</td><td>Parse settings and validate probabilities, limits, and ranges.</td></tr>
             <tr><td><code>WebServer::assignRequest(request)</code></td><td>One request</td><td><code>true</code> if assigned; <code>false</code> if busy</td><td>Accept work only while the server is idle.</td></tr>
-            <tr><td><code>WebServer::tick()</code></td><td>No arguments; advances one cycle</td><td><code>true</code> exactly when this tick completes its request</td><td>Decrease remaining time; clear completed work and become idle.</td></tr>
+            <tr><td><code>WebServer::tick()</code></td><td>No arguments; advances one cycle</td><td><code>true</code> exactly when this tick completes its request</td><td>Decrease remaining time; clear completed work and become idle. The load balancer ticks only requests assigned on an earlier cycle.</td></tr>
             <tr><td><code>WebServer::isBusy()</code></td><td>None</td><td>Boolean</td><td>Report whether an active request can be removed with the server.</td></tr>
             <tr><td><code>IPBlocker::isBlocked(ip)</code></td><td>Source IPv4 text</td><td>Boolean; throws for malformed IP</td><td>Parse numerically and compare against exact addresses/CIDR masks.</td></tr>
-            <tr><td><code>LoadBalancer::LoadBalancer(config)</code></td><td>Validated configuration</td><td>Initialized load balancer</td><td>Create initial servers and filter the initial requests through the blocker into the FIFO queue.</td></tr>
-            <tr><td><code>LoadBalancer::run(cycles)</code></td><td>Positive cycle count</td><td>None; emits summaries/log and updates statistics</td><td>For each cycle: arrivals, scaling check, dispatch FIFO work, tick servers, record completions, advance clock.</td></tr>
+            <tr><td><code>LoadBalancer::LoadBalancer(config)</code></td><td>Validated configuration</td><td>Initialized load balancer</td><td>Split total servers evenly between P and S pools (P gets an odd extra), then filter initial requests into the matching FIFO queue.</td></tr>
+            <tr><td><code>LoadBalancer::submitRequest(request)</code></td><td>Generated request with P or S job type</td><td>None; updates accepted or blocked counters</td><td>Apply the IP blocker, then route allowed P/S work to its corresponding queue.</td></tr>
+            <tr><td><code>LoadBalancer::run(cycles)</code></td><td>Positive cycle count</td><td>None; emits summaries/log and updates statistics</td><td>For each cycle: arrivals, per-pool scaling check, tick previously active servers, record completions, dispatch each FIFO only to its matching pool, advance clock.</td></tr>
             <tr><td><code>LoadBalancer::enqueueArrivals()</code></td><td>Configured probability and batch size</td><td>None; updates generated/blocked/accepted counts</td><td>Generate each request and apply the firewall before enqueueing.</td></tr>
-            <tr><td><code>LoadBalancer::scaleServers()</code></td><td>Current clock and waiting queue</td><td>None; updates server pool when allowed</td><td>Above 80× add one; below 50× remove one idle server; enforce cooldown and minimum count.</td></tr>
+            <tr><td><code>LoadBalancer::scaleServers()</code></td><td>Current clock, per-type queues, and pool sizes</td><td>None; updates one pool at most</td><td>Check each type's queue against 80×/50× its own server count; enforce global cooldown and at least one server per type.</td></tr>
             <tr><td><code>LoadBalancer::getStats()</code></td><td>None</td><td>Snapshot of run counters</td><td>Expose counts for tests and the generated-request accounting check.</td></tr>
             <tr><td><code>main(argc, argv)</code></td><td>Command-line options and interactive answers when omitted</td><td>Process exit status: 0 success, nonzero invalid input/runtime error</td><td>Load config, obtain starting servers and duration, apply mode/log overrides, create and run the balancer.</td></tr>
           </tbody>
         </table>
       </div>
-      <p><strong>Cycle order:</strong> generate/filter arrivals → check scaling/cooldown → dispatch requests from the queue front to idle servers → advance each busy server by one cycle → record completions → increment completed-cycle count. An assigned five-cycle request is ticked on five successive cycles and becomes idle after the fifth tick.</p>
+      <p><strong>Cycle order:</strong> generate/filter arrivals → check scaling/cooldown → advance each server that was already busy → record completions → dispatch requests from the queue front to idle servers → increment completed-cycle count. Newly assigned requests start ticking next cycle. For example, a five-cycle request dispatched after the cycle-0 processing step gets its five ticks in cycles 1 through 5 and then becomes idle.</p>
     </section>
     <section>
       <h2>Scaling and reporting</h2>
-      <p>At most one server is added or removed per scaling check. The queue thresholds are strict: scale up above 80 waiting requests per server, and scale down below 50. A configurable cooldown separates successful changes. Only idle servers are removed, with a configurable minimum pool size.</p>
-      <p>Verbose mode logs meaningful request and scaling events; quiet mode keeps console output to start/end summaries. Both modes write run statistics to the configured log. End-of-run reporting separates queued and active requests from completed requests.</p>
+      <p>The user's starting server count is total capacity. It is split evenly between the two job pools, assigning an odd extra server to P; therefore at least two starting servers are needed. Each type is queued FIFO and only handled by its own servers. Each pool is scaled against its own waiting queue: at most one server is added or removed globally per scaling check. Thresholds are strict: scale up above 80 waiting requests per server, and scale down below 50. A shared configurable cooldown separates successful changes. Each type keeps at least one server, and only idle servers are removed.</p>
+      <p>Verbose mode logs completions, blocked requests, server scaling, and periodic queue/server snapshots. It omits routine accepted/dispatched request events, which can overwhelm a high-volume log. Quiet mode keeps console output to start/end summaries. Both modes write run statistics to the configured log, and console-only ANSI colors never enter the log file. End-of-run reporting separates queued and active requests from completed requests.</p>
     </section>
     <section>
       <h2>API documentation and hosting</h2>

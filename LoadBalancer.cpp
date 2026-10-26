@@ -15,10 +15,10 @@
 LoadBalancer::LoadBalancer(const Config& config)
     : config_(config), blocker_(config.blockedIpRanges),
       random_(config.randomSeed == 0 ? std::random_device{}() : config.randomSeed) {
-    if (config_.initialServers < 1 ||
+    if (config_.initialServers < 2 ||
         config_.initialServers < config_.minimumServers ||
         config_.initialServers > config_.maximumServers ||
-        config_.minimumServers < 1 ||
+        config_.minimumServers < 2 ||
         config_.minimumServers > config_.maximumServers ||
         config_.initialRequestsPerServer < 0 ||
         config_.minimumProcessingTime <= 0 ||
@@ -33,10 +33,20 @@ LoadBalancer::LoadBalancer(const Config& config)
         throw std::invalid_argument("Invalid load-balancer configuration.");
     }
 
-    servers_.reserve(static_cast<std::size_t>(config_.maximumServers));
+    processingPool_.servers.reserve(
+        static_cast<std::size_t>((config_.maximumServers + 1) / 2));
+    streamingPool_.servers.reserve(
+        static_cast<std::size_t>(config_.maximumServers / 2));
     startingServerCount_ = config_.initialServers;
-    for (int i = 0; i < config_.initialServers; ++i) {
-        servers_.push_back(std::make_unique<WebServer>(nextServerId_++));
+    const int processingServerCount = (config_.initialServers + 1) / 2;
+    const int streamingServerCount = config_.initialServers / 2;
+    for (int i = 0; i < processingServerCount; ++i) {
+        processingPool_.servers.push_back(
+            std::make_unique<WebServer>(nextServerId_++));
+    }
+    for (int i = 0; i < streamingServerCount; ++i) {
+        streamingPool_.servers.push_back(
+            std::make_unique<WebServer>(nextServerId_++));
     }
 
     const std::size_t initialRequestCount =
@@ -45,7 +55,7 @@ LoadBalancer::LoadBalancer(const Config& config)
     for (std::size_t i = 0; i < initialRequestCount; ++i) {
         submitRequest(generateRequest());
     }
-    initialQueueSize_ = requestQueue_.size();
+    initialQueueSize_ = getQueueSize();
     peakQueueSize_ = initialQueueSize_;
 }
 
@@ -68,19 +78,30 @@ void LoadBalancer::run(int duration) {
 
     while (clock_ < duration) {
         enqueueArrivals();
-        peakQueueSize_ = std::max(peakQueueSize_, requestQueue_.size());
+        peakQueueSize_ = std::max(peakQueueSize_, getQueueSize());
         scaleServers();
-        dispatchRequests();
 
-        for (const std::unique_ptr<WebServer>& server : servers_) {
-            if (server->tick()) {
-                ++completedRequests_;
-                logEvent("Clock " + std::to_string(clock_) +
-                             ": request completed.",
-                         "\x1b[32m");
+        for (JobPool* pool : {&processingPool_, &streamingPool_}) {
+            for (const std::unique_ptr<WebServer>& server : pool->servers) {
+                const std::optional<std::uint64_t> requestId =
+                    server->getCurrentRequestId();
+                if (server->tick()) {
+                    ++completedRequests_;
+                    ++pool->completedRequests;
+                    logEvent("Clock " + std::to_string(clock_) + ": " +
+                                 pool->jobType + " request #" +
+                                 std::to_string(*requestId) + " completed on server " +
+                                 std::to_string(server->getId()) + ".",
+                             "\x1b[32m");
+                }
             }
         }
+        dispatchRequests();
         ++clock_;
+        if (config_.progressSnapshotInterval > 0 &&
+            clock_ % config_.progressSnapshotInterval == 0) {
+            logProgressSnapshot();
+        }
     }
 
     writeSummary(std::cout);
@@ -92,11 +113,12 @@ void LoadBalancer::run(int duration) {
 }
 
 std::size_t LoadBalancer::getQueueSize() const {
-    return requestQueue_.size();
+    return processingPool_.requests.size() + streamingPool_.requests.size();
 }
 
 int LoadBalancer::getServerCount() const {
-    return static_cast<int>(servers_.size());
+    return static_cast<int>(processingPool_.servers.size() +
+                            streamingPool_.servers.size());
 }
 
 SimulationStats LoadBalancer::getStats() const {
@@ -105,14 +127,20 @@ SimulationStats LoadBalancer::getStats() const {
             requestedCycles_,
             clock_,
             initialQueueSize_,
-            requestQueue_.size(),
+            getQueueSize(),
             getActiveRequestCount(),
             generatedRequests_,
             acceptedRequests_,
             blockedRequests_,
             completedRequests_,
             serversAdded_,
-            serversRemoved_};
+            serversRemoved_,
+            static_cast<int>(processingPool_.servers.size()),
+            static_cast<int>(streamingPool_.servers.size()),
+            processingPool_.requests.size(),
+            streamingPool_.requests.size(),
+            processingPool_.completedRequests,
+            streamingPool_.completedRequests};
 }
 
 Request LoadBalancer::generateRequest() {
@@ -142,15 +170,9 @@ void LoadBalancer::submitRequest(Request request) {
         return;
     }
 
-    requestQueue_.push(std::move(request));
+    JobPool& pool = request.jobType == 'P' ? processingPool_ : streamingPool_;
+    pool.requests.push(std::move(request));
     ++acceptedRequests_;
-    const Request& queuedRequest = requestQueue_.back();
-    logEvent("Clock " + std::to_string(clock_) + ": accepted request #" +
-                 std::to_string(queuedRequest.requestId) + " (" +
-                 queuedRequest.inputIp + " -> " + queuedRequest.outputIp + ", " +
-                 std::to_string(queuedRequest.processingTime) + " cycles, " +
-                 queuedRequest.jobType + ").",
-             "\x1b[36m");
 }
 
 void LoadBalancer::enqueueArrivals() {
@@ -165,17 +187,14 @@ void LoadBalancer::enqueueArrivals() {
 }
 
 void LoadBalancer::dispatchRequests() {
-    for (const std::unique_ptr<WebServer>& server : servers_) {
-        if (requestQueue_.empty()) {
-            break;
-        }
-        if (!server->isBusy() && server->assignRequest(requestQueue_.front())) {
-            const Request& request = requestQueue_.front();
-            logEvent("Clock " + std::to_string(clock_) + ": server " +
-                         std::to_string(server->getId()) + " started request #" +
-                         std::to_string(request.requestId) + ".",
-                     "\x1b[34m");
-            requestQueue_.pop();
+    for (JobPool* pool : {&processingPool_, &streamingPool_}) {
+        for (const std::unique_ptr<WebServer>& server : pool->servers) {
+            if (pool->requests.empty()) {
+                break;
+            }
+            if (!server->isBusy() && server->assignRequest(pool->requests.front())) {
+                pool->requests.pop();
+            }
         }
     }
 }
@@ -185,42 +204,54 @@ void LoadBalancer::scaleServers() {
         return;
     }
 
-    const std::size_t serverCount = servers_.size();
-    if (requestQueue_.size() >
-            static_cast<std::size_t>(config_.scaleUpQueuePerServer) * serverCount &&
-        getServerCount() < config_.maximumServers) {
-        servers_.push_back(std::make_unique<WebServer>(nextServerId_++));
-        ++serversAdded_;
+    for (JobPool* pool : {&processingPool_, &streamingPool_}) {
+        if (pool->requests.size() >
+                static_cast<std::size_t>(config_.scaleUpQueuePerServer) *
+                    pool->servers.size() &&
+            getServerCount() < config_.maximumServers) {
+            pool->servers.push_back(std::make_unique<WebServer>(nextServerId_++));
+            ++pool->serversAdded;
+            ++serversAdded_;
+            nextScalingClock_ = clock_ + config_.scalingCooldownCycles;
+            logEvent("Clock " + std::to_string(clock_) + ": added a " +
+                         (pool->jobType == 'P' ? "processing" : "streaming") +
+                         " server; total pool is now " +
+                         std::to_string(getServerCount()) + ".",
+                     "\x1b[33m");
+            return;
+        }
+    }
+
+    const int minimumTotalServers = std::max(2, config_.minimumServers);
+    for (JobPool* pool : {&processingPool_, &streamingPool_}) {
+        if (pool->requests.size() >=
+                static_cast<std::size_t>(config_.scaleDownQueuePerServer) *
+                    pool->servers.size() ||
+            getServerCount() <= minimumTotalServers || pool->servers.size() <= 1) {
+            continue;
+        }
+
+        const auto idleServer =
+            std::find_if(pool->servers.rbegin(), pool->servers.rend(),
+                         [](const std::unique_ptr<WebServer>& server) {
+                             return !server->isBusy();
+                         });
+        if (idleServer == pool->servers.rend()) {
+            continue;
+        }
+
+        const int removedId = (*idleServer)->getId();
+        pool->servers.erase(std::next(idleServer).base());
+        ++pool->serversRemoved;
+        ++serversRemoved_;
         nextScalingClock_ = clock_ + config_.scalingCooldownCycles;
-        logEvent("Clock " + std::to_string(clock_) + ": added a server; pool is now " +
-                     std::to_string(getServerCount()) + ".",
+        logEvent("Clock " + std::to_string(clock_) + ": removed idle " +
+                     (pool->jobType == 'P' ? "processing" : "streaming") +
+                     " server " + std::to_string(removedId) +
+                     "; total pool is now " + std::to_string(getServerCount()) + ".",
                  "\x1b[33m");
         return;
     }
-
-    if (requestQueue_.size() >=
-            static_cast<std::size_t>(config_.scaleDownQueuePerServer) * serverCount ||
-        getServerCount() <= config_.minimumServers) {
-        return;
-    }
-
-    const auto idleServer =
-        std::find_if(servers_.rbegin(), servers_.rend(),
-                     [](const std::unique_ptr<WebServer>& server) {
-                         return !server->isBusy();
-                     });
-    if (idleServer == servers_.rend()) {
-        return;
-    }
-
-    const int removedId = (*idleServer)->getId();
-    servers_.erase(std::next(idleServer).base());
-    ++serversRemoved_;
-    nextScalingClock_ = clock_ + config_.scalingCooldownCycles;
-    logEvent("Clock " + std::to_string(clock_) + ": removed idle server " +
-                 std::to_string(removedId) + "; pool is now " +
-                 std::to_string(getServerCount()) + ".",
-             "\x1b[33m");
 }
 
 void LoadBalancer::logEvent(const std::string& message, const char* color) {
@@ -232,15 +263,43 @@ void LoadBalancer::logEvent(const std::string& message, const char* color) {
     log_ << message << '\n';
 }
 
+void LoadBalancer::logProgressSnapshot() {
+    if (!config_.verbose) {
+        return;
+    }
+
+    const std::string snapshot =
+        "Progress at cycle " + std::to_string(clock_) + "/" +
+        std::to_string(requestedCycles_) + ": P-queue=" +
+        std::to_string(processingPool_.requests.size()) + ", S-queue=" +
+        std::to_string(streamingPool_.requests.size()) + ", active=" +
+        std::to_string(getActiveRequestCount()) + ", servers=" +
+        std::to_string(getServerCount()) + ", generated=" +
+        std::to_string(generatedRequests_) + ", completed=" +
+        std::to_string(completedRequests_) + ", blocked=" +
+        std::to_string(blockedRequests_) + ".";
+    std::cout << "\x1b[35m" << snapshot << "\x1b[0m\n";
+    log_ << snapshot << '\n';
+}
+
 std::size_t LoadBalancer::getActiveRequestCount() const {
-    return static_cast<std::size_t>(std::count_if(
-        servers_.begin(), servers_.end(),
-        [](const std::unique_ptr<WebServer>& server) { return server->isBusy(); }));
+    std::size_t activeCount = 0;
+    for (const JobPool* pool : {&processingPool_, &streamingPool_}) {
+        activeCount += static_cast<std::size_t>(std::count_if(
+            pool->servers.begin(), pool->servers.end(),
+            [](const std::unique_ptr<WebServer>& server) {
+                return server->isBusy();
+            }));
+    }
+    return activeCount;
 }
 
 void LoadBalancer::writeStartingSummary(std::ostream& output, int duration) const {
     output << "Starting simulation\n"
            << "Initial servers: " << startingServerCount_ << '\n'
+           << "Initial processing servers: " << ((startingServerCount_ + 1) / 2)
+           << '\n'
+           << "Initial streaming servers: " << (startingServerCount_ / 2) << '\n'
            << "Requested cycles: " << duration << '\n'
            << "Initial queue size: " << initialQueueSize_ << '\n'
            << "Logging mode: " << (config_.verbose ? "verbose" : "quiet") << '\n'
@@ -251,6 +310,8 @@ void LoadBalancer::writeStartingSummary(std::ostream& output, int duration) cons
            << '\n'
            << "Arrival probability: " << config_.arrivalProbability << '\n'
            << "Arrival batch size: " << config_.arrivalBatchSize << '\n'
+           << "Progress snapshot interval: "
+           << config_.progressSnapshotInterval << " cycles\n"
            << "Processing time bounds: " << config_.minimumProcessingTime << " to "
            << config_.maximumProcessingTime << " cycles\n"
            << "Scale-up threshold: above " << config_.scaleUpQueuePerServer
@@ -274,18 +335,27 @@ void LoadBalancer::writeStartingSummary(std::ostream& output, int duration) cons
            << "\nBlocked requests so far: " << blockedRequests_ << "\n\n";
 }
 
-void LoadBalancer::writeSummary(std::ostream& output) const {
+void LoadBalancer::writeSummary(std::ostream& output) {
     const std::size_t activeRequests = getActiveRequestCount();
+    const std::size_t remainingQueuedRequests = getQueueSize();
     const bool accountingBalanced =
         generatedRequests_ ==
-        blockedRequests_ + completedRequests_ + requestQueue_.size() + activeRequests;
+        blockedRequests_ + completedRequests_ + remainingQueuedRequests + activeRequests;
     output << "Ending summary\n"
            << "Initial servers: " << startingServerCount_ << '\n'
            << "Final servers: " << getServerCount() << '\n'
+           << "Processing servers: " << processingPool_.servers.size() << '\n'
+           << "Streaming servers: " << streamingPool_.servers.size() << '\n'
+           << "Processing requests completed: "
+           << processingPool_.completedRequests << '\n'
+           << "Streaming requests completed: "
+           << streamingPool_.completedRequests << '\n'
            << "Requested cycles: " << requestedCycles_ << '\n'
            << "Cycles completed: " << clock_ << '\n'
            << "Initial queue size: " << initialQueueSize_ << '\n'
-           << "Remaining queued requests: " << requestQueue_.size() << '\n'
+           << "Remaining queued requests: " << remainingQueuedRequests << '\n'
+           << "Processing queue: " << processingPool_.requests.size() << '\n'
+           << "Streaming queue: " << streamingPool_.requests.size() << '\n'
            << "Requests still processing: " << activeRequests << '\n'
            << "Generated requests: " << generatedRequests_ << '\n'
            << "Accepted requests: " << acceptedRequests_ << '\n'

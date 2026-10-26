@@ -99,6 +99,8 @@ Config Config::loadFromFile(const std::string& path) {
             config.arrivalProbability = parseDouble(value, key);
         } else if (key == "arrival_batch_size") {
             config.arrivalBatchSize = parseInt(value, key);
+        } else if (key == "progress_snapshot_interval") {
+            config.progressSnapshotInterval = parseInt(value, key);
         } else if (key == "scale_up_queue_per_server") {
             config.scaleUpQueuePerServer = parseInt(value, key);
         } else if (key == "scale_down_queue_per_server") {
@@ -136,14 +138,16 @@ Config Config::loadFromFile(const std::string& path) {
         }
     }
 
-    if (config.simulationCycles <= 0 || config.minimumServers <= 0 ||
+    if (config.simulationCycles <= 0 || config.minimumServers < 2 ||
         config.maximumServers < config.minimumServers ||
+        config.initialServers < 2 ||
         config.initialServers < config.minimumServers ||
         config.initialServers > config.maximumServers ||
         config.initialRequestsPerServer < 0 ||
         config.minimumProcessingTime <= 0 ||
         config.maximumProcessingTime < config.minimumProcessingTime ||
         config.arrivalBatchSize <= 0 ||
+        config.progressSnapshotInterval < 0 ||
         config.scaleUpQueuePerServer < 0 || config.scaleDownQueuePerServer < 0 ||
         config.scalingCooldownCycles < 0 ||
         !std::isfinite(config.arrivalProbability) ||

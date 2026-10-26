@@ -7,6 +7,7 @@
 
 #include "Request.h"
 
+#include <cstdint>
 #include <optional>
 
 class WebServer {
@@ -22,6 +23,10 @@ public:
     int getId() const;
     /** @return True if a request is currently being processed. */
     bool isBusy() const;
+    /**
+     * @return Active request ID, or an empty optional if the server is idle.
+     */
+    std::optional<std::uint64_t> getCurrentRequestId() const;
     /**
      * @brief Assigns work if idle; returns false if already busy.
      * @param request Request to begin processing.

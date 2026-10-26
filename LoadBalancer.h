@@ -34,6 +34,12 @@ struct SimulationStats {
     std::size_t completedRequests = 0;
     std::size_t serversAdded = 0;
     std::size_t serversRemoved = 0;
+    int processingServers = 0;
+    int streamingServers = 0;
+    std::size_t processingQueueSize = 0;
+    std::size_t streamingQueueSize = 0;
+    std::size_t processingCompleted = 0;
+    std::size_t streamingCompleted = 0;
 };
 
 /**
@@ -64,6 +70,17 @@ public:
     SimulationStats getStats() const;
 
 private:
+    struct JobPool {
+        explicit JobPool(char type) : jobType(type) {}
+
+        char jobType;
+        std::queue<Request> requests;
+        std::vector<std::unique_ptr<WebServer>> servers;
+        std::size_t serversAdded = 0;
+        std::size_t serversRemoved = 0;
+        std::size_t completedRequests = 0;
+    };
+
     /** @brief Generates a request with a unique ID and configured random fields. */
     Request generateRequest();
     /** @brief Applies the blocker and queues an allowed request. */
@@ -72,21 +89,23 @@ private:
     void enqueueArrivals();
     /** @brief Dispatches queued requests from oldest to idle servers. */
     void dispatchRequests();
-    /** @brief Applies threshold and cooldown rules to the server pool. */
+    /** @brief Applies threshold and cooldown rules to both job-specific pools. */
     void scaleServers();
+    /** @brief Logs queue and capacity counters at the configured interval. */
+    void logProgressSnapshot();
     /** @brief Writes an event to verbose console and log output. */
     void logEvent(const std::string& message, const char* color = "");
     /** @brief Writes initial settings and counts to the specified stream. */
     void writeStartingSummary(std::ostream& output, int duration) const;
     /** @brief Writes final counts and validates request accounting. */
-    void writeSummary(std::ostream& output) const;
+    void writeSummary(std::ostream& output);
     /** @return Number of requests currently assigned to servers. */
     std::size_t getActiveRequestCount() const;
 
     Config config_;
     IPBlocker blocker_;
-    std::queue<Request> requestQueue_;
-    std::vector<std::unique_ptr<WebServer>> servers_;
+    JobPool processingPool_{'P'};
+    JobPool streamingPool_{'S'};
     std::mt19937 random_;
     int nextServerId_ = 0;
     int clock_ = 0;

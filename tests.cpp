@@ -19,8 +19,8 @@
 namespace {
 Config baseConfig(const std::string& logPath) {
     Config config;
-    config.initialServers = 1;
-    config.minimumServers = 1;
+    config.initialServers = 2;
+    config.minimumServers = 2;
     config.maximumServers = 10;
     config.initialRequestsPerServer = 0;
     config.minimumProcessingTime = 1;
@@ -30,6 +30,7 @@ Config baseConfig(const std::string& logPath) {
     config.scaleUpQueuePerServer = 80;
     config.scaleDownQueuePerServer = 50;
     config.scalingCooldownCycles = 3;
+    config.progressSnapshotInterval = 1;
     config.randomSeed = 17;
     config.verbose = false;
     config.logFile = logPath;
@@ -60,28 +61,60 @@ void testServerFinishesExactlyOnFifthTick() {
 void testFifoDispatchAndAccounting() {
     const std::string logPath = "fifo-test.log";
     Config config = baseConfig(logPath);
-    config.maximumServers = 1;
+    config.maximumServers = 2;
     config.initialRequestsPerServer = 2;
     config.verbose = true;
 
     LoadBalancer balancer(config);
-    balancer.run(2);
+    balancer.run(6);
     const SimulationStats stats = balancer.getStats();
-    assert(stats.generatedRequests == 2);
-    assert(stats.completedRequests == 2);
+    assert(stats.generatedRequests == 4);
+    assert(stats.completedRequests == 4);
     assert(stats.remainingQueuedRequests == 0);
     assert(stats.requestsStillProcessing == 0);
 
     const std::string log = readFile(logPath);
-    const std::size_t first = log.find("started request #0");
-    const std::size_t second = log.find("started request #1");
-    assert(first != std::string::npos);
-    assert(second != std::string::npos);
-    assert(first < second);
+    const std::size_t firstStreaming = log.find("S request #0 completed");
+    const std::size_t secondStreaming = log.find("S request #1 completed");
+    assert(firstStreaming != std::string::npos);
+    assert(secondStreaming != std::string::npos);
+    assert(firstStreaming < secondStreaming);
+    assert(stats.processingCompleted > 0);
+    assert(stats.streamingCompleted > 0);
+    assert(log.find("Progress at cycle 1/6") != std::string::npos);
+    assert(log.find("accepted request") == std::string::npos);
+    assert(log.find("started request") == std::string::npos);
     assert(log.find("Accounting check (generated = blocked + completed + queued + "
                     "processing): PASS") != std::string::npos);
     assert(log.find('\x1b') == std::string::npos);
     std::remove(logPath.c_str());
+}
+
+void testAssignedRequestsStartOnNextCycle() {
+    Config config = baseConfig("next-cycle-five.log");
+    config.initialRequestsPerServer = 1;
+    config.minimumProcessingTime = 5;
+    config.maximumProcessingTime = 5;
+
+    LoadBalancer fiveCycleRun(config);
+    fiveCycleRun.run(5);
+    const SimulationStats fiveCycleStats = fiveCycleRun.getStats();
+    assert(fiveCycleStats.completedRequests == 0);
+    assert(fiveCycleStats.remainingQueuedRequests +
+               fiveCycleStats.requestsStillProcessing ==
+           2);
+    std::remove(config.logFile.c_str());
+
+    config.logFile = "next-cycle-six.log";
+    LoadBalancer sixCycleRun(config);
+    sixCycleRun.run(6);
+    const SimulationStats sixCycleStats = sixCycleRun.getStats();
+    assert(sixCycleStats.completedRequests >= 1);
+    assert(sixCycleStats.generatedRequests ==
+           sixCycleStats.completedRequests +
+               sixCycleStats.remainingQueuedRequests +
+               sixCycleStats.requestsStillProcessing);
+    std::remove(config.logFile.c_str());
 }
 
 void testScaleUpAndCooldown() {
@@ -95,15 +128,16 @@ void testScaleUpAndCooldown() {
     balancer.run(7);
     const SimulationStats stats = balancer.getStats();
     assert(stats.serversAdded == 3);
-    assert(stats.finalServers == 4);
+    assert(stats.finalServers == 5);
     std::remove(logPath.c_str());
 }
 
 void testBusyServersAreNotRemovedAndMinimumIsOne() {
     const std::string busyLogPath = "busy-scale-test.log";
     Config busyConfig = baseConfig(busyLogPath);
-    busyConfig.initialRequestsPerServer = 81;
-    busyConfig.maximumServers = 2;
+    busyConfig.initialRequestsPerServer = 100;
+    busyConfig.maximumServers = 3;
+    busyConfig.scaleUpQueuePerServer = 0;
     busyConfig.minimumProcessingTime = 5;
     busyConfig.maximumProcessingTime = 5;
     busyConfig.scalingCooldownCycles = 0;
@@ -111,20 +145,32 @@ void testBusyServersAreNotRemovedAndMinimumIsOne() {
     busyBalancer.run(6);
     const SimulationStats busyStats = busyBalancer.getStats();
     assert(busyStats.serversAdded == 1);
-    assert(busyStats.serversRemoved == 1);
-    assert(busyStats.finalServers == 1);
+    assert(busyStats.serversRemoved == 0);
+    assert(busyStats.finalServers == 3);
     std::remove(busyLogPath.c_str());
+
+    const std::string idleLogPath = "idle-scale-test.log";
+    Config idleConfig = busyConfig;
+    idleConfig.logFile = idleLogPath;
+    LoadBalancer idleBalancer(idleConfig);
+    idleBalancer.run(600);
+    const SimulationStats idleStats = idleBalancer.getStats();
+    assert(idleStats.serversAdded >= 1);
+    assert(idleStats.serversRemoved >= 1);
+    assert(idleStats.finalServers == 2);
+    std::remove(idleLogPath.c_str());
 
     const std::string minimumLogPath = "minimum-scale-test.log";
     Config minimumConfig = baseConfig(minimumLogPath);
     minimumConfig.initialServers = 2;
+    minimumConfig.minimumServers = 2;
     minimumConfig.maximumServers = 2;
     minimumConfig.scalingCooldownCycles = 0;
     LoadBalancer minimumBalancer(minimumConfig);
     minimumBalancer.run(4);
     const SimulationStats minimumStats = minimumBalancer.getStats();
-    assert(minimumStats.finalServers == 1);
-    assert(minimumStats.serversRemoved == 1);
+    assert(minimumStats.finalServers == 2);
+    assert(minimumStats.serversRemoved == 0);
     std::remove(minimumLogPath.c_str());
 }
 
@@ -148,8 +194,8 @@ void testFirewallBoundariesAndGeneratedAccounting() {
     LoadBalancer balancer(config);
     balancer.run(2);
     const SimulationStats stats = balancer.getStats();
-    assert(stats.generatedRequests == 104);
-    assert(stats.blockedRequests == 104);
+    assert(stats.generatedRequests == 204);
+    assert(stats.blockedRequests == 204);
     assert(stats.acceptedRequests == 0);
     assert(stats.generatedRequests ==
            stats.blockedRequests + stats.completedRequests +
@@ -196,6 +242,7 @@ void testInvalidConfigurationIsRejected() {
 int main() {
     testServerFinishesExactlyOnFifthTick();
     testFifoDispatchAndAccounting();
+    testAssignedRequestsStartOnNextCycle();
     testScaleUpAndCooldown();
     testBusyServersAreNotRemovedAndMinimumIsOne();
     testFirewallBoundariesAndGeneratedAccounting();

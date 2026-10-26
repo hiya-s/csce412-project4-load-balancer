@@ -20,6 +20,13 @@ bool WebServer::isBusy() const {
     return currentRequest_.has_value();
 }
 
+std::optional<std::uint64_t> WebServer::getCurrentRequestId() const {
+    if (!currentRequest_) {
+        return std::nullopt;
+    }
+    return currentRequest_->requestId;
+}
+
 bool WebServer::assignRequest(const Request& request) {
     if (isBusy()) {
         return false;
