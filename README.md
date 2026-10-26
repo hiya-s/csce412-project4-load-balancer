@@ -28,27 +28,57 @@ to use the configured defaults):
 ./load_balancer
 ```
 
-Use flags for a non-interactive run. The assignment's requested 20-server,
-100,000-cycle quiet run is:
+Use flags for a non-interactive run. To reproduce the required 20-starting-
+server, 100,000-cycle quiet run and write its summary to a log:
 
 ```sh
 ./load_balancer --servers 20 --cycles 100000 --quiet --log project4-summary.log
 ```
 
-Use `--verbose` instead of `--quiet` to print meaningful completions, blocked
-requests, scaling events, and periodic progress snapshots. Routine accepted
-and dispatched request events are intentionally omitted so logs remain useful
-at high traffic rates. Set `progress_snapshot_interval` to control snapshot
-frequency, or zero to disable snapshots. Quiet mode prints the starting and
-ending summaries; both modes write a summary to the log file.
-Use `--help` to show all command-line flags. No executable or generated log
-needs to be included in a source-only submission archive.
+To create a useful event log instead, run the same workload in verbose mode:
 
-The checked-in `project4-summary.log` is the quiet 20-server, 100,000-cycle
-sample run. The default arrival probability is 0.65, with one arrival per
-successful arrival event; service times are 2–10 cycles and scaling has a
-10-cycle cooldown. This produces a starting queue of 2,000 for the requested
-20-server run while allowing the pool to shrink or grow with demand.
+```sh
+./load_balancer --servers 20 --cycles 100000 --verbose --log project4-verbose.log
+```
+
+`--quiet` prints only the starting and ending summaries. `--verbose` also
+prints and logs request completions, blocked requests, server scaling actions,
+and periodic progress snapshots; it does not print every clock cycle or
+routine accepted/dispatched requests. Snapshots are controlled by
+`progress_snapshot_interval` (set it to `0` to disable them). Both modes write
+the starting and ending summaries to the selected log file, and verbose mode
+adds the event details. Console event colors are not written to the log.
+Use `--help` to show all command-line options. For Windows PowerShell, invoke
+the executable as `.\load_balancer.exe` with the same options.
+
+### Required 20-server, 100,000-cycle run
+
+[`project4-summary.log`](project4-summary.log) is the actual quiet-mode output
+from the required run. It used the settings shown in `config.txt`, with the
+server count and duration overridden by the command above. The run started
+with 20 servers (10 processing and 10 streaming), generated 2,000 initial
+requests, and blocked 5 of those, leaving an initial queue of 1,995. Because
+scaling is enabled, 20 is the starting count, not a fixed count.
+
+| Result | Value |
+| --- | ---: |
+| Requested and completed clock cycles | 100,000 |
+| Initial servers (processing / streaming) | 20 (10 / 10) |
+| Final servers (processing / streaming) | 4 (2 / 2) |
+| Initial queue after firewall checks | 1,995 |
+| Generated requests | 66,949 |
+| Blocked requests | 224 |
+| Completed requests (processing / streaming) | 66,614 (33,159 / 33,455) |
+| Requests remaining in queues | 107 (77 processing / 30 streaming) |
+| Requests still being processed | 4 |
+| Servers added / removed | 27 / 43 |
+| Request accounting | PASS |
+
+The accounting check is
+`generated = blocked + completed + queued + still processing`; for this run,
+`66,949 = 224 + 66,614 + 107 + 4`. Generated totals include initial and
+later-arriving requests. The initial queue count reflects only requests
+accepted by the firewall.
 
 ## Configuration
 
@@ -80,8 +110,7 @@ Each pool scales against its own waiting queue and server count. A pool always
 keeps one server; only idle servers are removed. Accepted requests are checked
 against blocked ranges before entering their type-specific FIFO queue. At the
 end of a run, queued and active requests are reported separately from completed
-work. The summary checks
-`generated = blocked + completed + queued + still processing`.
+work.
 
 ## Method and cycle design
 
@@ -90,12 +119,13 @@ configuration loading, server assignment and ticking, numeric IP checking,
 queue processing, scaling, statistics, and `main()`. Each cycle follows this
 order: generate and firewall-check arrivals; evaluate scaling and cooldown;
 tick each server that was already busy at the start of processing; record any
-completion; dispatch each queue's FIFO requests only to its matching pool's idle servers;
-then advance the completed-cycle count. Newly assigned work therefore gets its
-first processing tick on the next cycle. A five-cycle request assigned after cycle 0 completes
-after the tick on cycle 5. `WebServer::tick()` returns true exactly on the
-cycle a request completes. The load balancer owns each server through
-`std::unique_ptr`, so successful scaling destroys removed idle server objects.
+completion; dispatch each queue's FIFO requests only to its matching pool's
+idle servers; then advance the completed-cycle count. Newly assigned work
+therefore gets its first processing tick on the next cycle. A five-cycle
+request assigned after cycle 0 completes after its fifth processing tick.
+`WebServer::tick()` returns true exactly on the cycle a request completes. The
+load balancer owns each server through `std::unique_ptr`, so successful scaling
+destroys removed idle server objects.
 
 Run focused regression tests with:
 
